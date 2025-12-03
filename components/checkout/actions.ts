@@ -10,7 +10,7 @@ import {
   shippingMethodFormSchema,
 } from "@/lib/sfcc/schemas";
 import { handleFormActionError } from "@/lib/sfcc/utils";
-import { revalidateTag } from "next/cache";
+import { updateTag } from "next/cache";
 import { cookies } from "next/headers";
 
 // Action to add/upate customer email and shipping address.
@@ -43,7 +43,7 @@ export async function updateShippingContact(
       phone: data.phone ? data.phone.replace(/\D/g, "") : undefined,
     });
 
-    revalidateTag(TAGS.cart);
+    updateTag(TAGS.cart);
   } catch (error) {
     return handleFormActionError(
       error,
@@ -68,7 +68,7 @@ export async function updateShippingMethod(
   try {
     await api.updateShippingMethod(data.shippingMethodId);
 
-    revalidateTag(TAGS.cart);
+    updateTag(TAGS.cart);
   } catch (error) {
     return handleFormActionError(
       error,
@@ -99,7 +99,7 @@ export async function addPaymentMethod(
       securityCode: data.securityCode,
     });
 
-    revalidateTag(TAGS.cart);
+    updateTag(TAGS.cart);
   } catch (error) {
     return handleFormActionError(
       error,
@@ -136,7 +136,7 @@ export async function updateBillingAddress(
         : undefined,
     });
 
-    revalidateTag(TAGS.cart);
+    updateTag(TAGS.cart);
   } catch (error) {
     return handleFormActionError(error, "Error updating billing address");
   }
@@ -155,7 +155,7 @@ export async function placeOrder(
     // Set the order number in a cookie so we can get the order details on the confirmation page.
     (await cookies()).set("orderId", order.orderNumber!);
 
-    revalidateTag(TAGS.cart);
+    updateTag(TAGS.cart);
   } catch (error) {
     return handleFormActionError(
       error,

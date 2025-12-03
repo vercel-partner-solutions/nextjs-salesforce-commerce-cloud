@@ -9,11 +9,7 @@ import {
   ShopperSearch,
 } from "commerce-sdk-isomorphic";
 import { TAGS } from "lib/constants";
-import {
-  unstable_cacheLife as cacheLife,
-  unstable_cacheTag as cacheTag,
-  revalidateTag,
-} from "next/cache";
+import { cacheLife, cacheTag, revalidateTag } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { defaultSort, storeCatalog } from "./constants";
@@ -159,17 +155,17 @@ export async function addToCart(
   try {
     const basketClient = new ShopperBaskets(config);
 
+    // Type assertion needed for commerce-sdk-isomorphic@4.0.0 stricter types
+    const body = lines.map((line) => ({
+      productId: line.merchandiseId,
+      quantity: line.quantity,
+    }));
     const basket = await basketClient.addItemToBasket({
       parameters: {
         basketId: cartId,
       },
-      body: lines.map((line) => {
-        return {
-          productId: line.merchandiseId,
-          quantity: line.quantity,
-        };
-      }),
-    });
+      body,
+    } as Parameters<typeof basketClient.addItemToBasket>[0]);
 
     if (!basket?.basketId) return;
 
@@ -232,19 +228,15 @@ export async function updateCart(
   await Promise.all(removePromises);
 
   // create addPromises for each line
-  const addPromises = lines.map((line) =>
-    basketClient.addItemToBasket({
+  const addPromises = lines.map((line) => {
+    const body = [{ productId: line.merchandiseId, quantity: line.quantity }];
+    return basketClient.addItemToBasket({
       parameters: {
         basketId: cartId,
       },
-      body: [
-        {
-          productId: line.merchandiseId,
-          quantity: line.quantity,
-        },
-      ],
-    })
-  );
+      body,
+    } as Parameters<typeof basketClient.addItemToBasket>[0]);
+  });
 
   // wait for all additions to resolve
   await Promise.all(addPromises);
@@ -310,24 +302,25 @@ export async function revalidate(req: NextRequest) {
   }
 
   if (isCollectionUpdate) {
-    revalidateTag(TAGS.collections);
+    revalidateTag(TAGS.collections, "max");
   }
 
   if (isProductUpdate) {
-    revalidateTag(TAGS.products);
+    revalidateTag(TAGS.products, "max");
   }
 
   return NextResponse.json({ status: 200, revalidated: true, now: Date.now() });
 }
 
 async function getGuestUserAuthToken() {
-  const loginClient = new ShopperLogin(apiConfig);
+  const slasClient = new ShopperLogin(apiConfig);
   try {
-    return await helpers.loginGuestUserPrivate(
-      loginClient,
-      {},
-      { clientSecret: process.env.SFCC_SECRET || "" }
-    );
+    // commerce-sdk-isomorphic@4.x uses a new API signature
+    return await helpers.loginGuestUserPrivate({
+      slasClient,
+      parameters: {},
+      credentials: { clientSecret: process.env.SFCC_SECRET || "" },
+    });
   } catch (e) {
     const error = await ensureSDKResponseError(
       e,
@@ -388,6 +381,7 @@ async function searchProducts(options: {
   const config = await getGuestUserConfig();
 
   const searchClient = new ShopperSearch(config);
+  // SDK v4 types refine as string but actually accepts string[]
   const searchResults = await searchClient.productSearch({
     parameters: {
       q: query || "",
@@ -395,7 +389,7 @@ async function searchProducts(options: {
       sort: sortKey,
       limit,
     },
-  });
+  } as unknown as Parameters<typeof searchClient.productSearch>[0]);
 
   const productsClient = new ShopperProducts(config);
 
