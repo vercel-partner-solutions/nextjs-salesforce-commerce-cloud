@@ -189,7 +189,7 @@ export const formatUKPhone = (value: string): string => {
 // Helper for returning the expected error state to actions instead of throwing.
 export const handleFormActionError = (
   error: unknown,
-  defaultMessage: string
+  defaultMessage: string,
 ) => {
   return {
     errors: {
@@ -207,7 +207,7 @@ type PrefixedShape<T extends z.ZodObject<any>, P extends string> = {
 // Creates a new Zod schema with all keys prefixed with the given string.
 export const prefixSchema = <T extends z.ZodObject<any>, P extends string>(
   schema: T,
-  prefix: P
+  prefix: P,
 ): z.ZodObject<PrefixedShape<T, P>> => {
   if (!prefix) return schema as z.ZodObject<PrefixedShape<T, P>>;
 
@@ -222,11 +222,12 @@ export const prefixSchema = <T extends z.ZodObject<any>, P extends string>(
 };
 
 export const validateEnvironmentVariables = () => {
+  // SFCC_SECRET is intentionally not required: public SLAS clients
+  // (e.g. the Salesforce demo backend) have no secret.
   const requiredEnvironmentVariables = [
     "SITE_NAME",
     "SFCC_CLIENT_ID",
     "SFCC_ORGANIZATIONID",
-    "SFCC_SECRET",
     "SFCC_SHORTCODE",
     "SFCC_SITEID",
     "SFCC_REVALIDATION_SECRET",
@@ -242,8 +243,8 @@ export const validateEnvironmentVariables = () => {
   if (missingEnvironmentVariables.length) {
     throw new Error(
       `The following environment variables are missing. Your site will not work without them. Read more: https://vercel.com/docs/integrations/shopify#configure-environment-variables\n\n${missingEnvironmentVariables.join(
-        "\n"
-      )}\n`
+        "\n",
+      )}\n`,
     );
   }
 };

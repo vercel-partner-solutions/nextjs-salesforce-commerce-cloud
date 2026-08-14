@@ -16,6 +16,11 @@ export default {
         protocol: "https",
         hostname: "edge.disstg.commercecloud.salesforce.com",
       },
+      {
+        // Salesforce public demo backend (PWA Kit demo instance)
+        protocol: "https",
+        hostname: "zzrf-001.dx.commercecloud.salesforce.com",
+      },
     ],
   },
 };

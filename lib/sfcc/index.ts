@@ -71,7 +71,20 @@ export async function getCollectionProducts({
   "use cache";
   cacheTag(TAGS.products, TAGS.collections);
   cacheLife("days");
-  return await searchProducts({ categoryId: collection, limit, sortKey });
+  const products = await searchProducts({
+    categoryId: collection,
+    limit,
+    sortKey,
+  });
+
+  // The hidden-homepage-* categories only exist in custom site data. When
+  // running against a catalog without them (e.g. the Salesforce demo
+  // backend), fall back to new arrivals so the homepage still has content.
+  if (!products.length && collection.startsWith("hidden-homepage")) {
+    return await searchProducts({ categoryId: "newarrivals", limit, sortKey });
+  }
+
+  return products;
 }
 
 export async function getProducts({
@@ -149,7 +162,7 @@ export async function getCart() {
 }
 
 export async function addToCart(
-  lines: { merchandiseId: string; quantity: number }[]
+  lines: { merchandiseId: string; quantity: number }[],
 ) {
   const cartId = (await cookies()).get("cartId")?.value!;
   // get the guest token to get the correct guest cart
@@ -205,7 +218,7 @@ export async function removeFromCart(lineIds: string[]) {
 }
 
 export async function updateCart(
-  lines: { id: string; merchandiseId: string; quantity: number }[]
+  lines: { id: string; merchandiseId: string; quantity: number }[],
 ) {
   const cartId = (await cookies()).get("cartId")?.value!;
   // get the guest token to get the correct guest cart
@@ -225,7 +238,7 @@ export async function updateCart(
         basketId: cartId,
         itemId: line.id,
       },
-    })
+    }),
   );
 
   // wait for all removals to resolve
@@ -243,7 +256,7 @@ export async function updateCart(
           quantity: line.quantity,
         },
       ],
-    })
+    }),
   );
 
   // wait for all additions to resolve
@@ -270,7 +283,7 @@ export async function getProductRecommendations(productId: string) {
   cacheTag(TAGS.products);
   cacheLife("days");
 
-  const categoryId = (await getProduct(productId)).categoryId;
+  const categoryId = (await getProduct(productId))?.categoryId;
 
   if (!categoryId) return [];
 
@@ -320,21 +333,99 @@ export async function revalidate(req: NextRequest) {
   return NextResponse.json({ status: 200, revalidated: true, now: Date.now() });
 }
 
-async function getGuestUserAuthToken() {
+async function getGuestUserAuthToken(): Promise<{ access_token: string }> {
+  // Public SLAS clients (no secret, e.g. Salesforce's hosted demo backend)
+  // use the guest authorization-code + PKCE flow. Implemented with plain
+  // fetch because the SDK's loginGuestUser helper breaks under Next's
+  // bundled server runtime.
+  if (!process.env.SFCC_SECRET) {
+    return await getPublicClientGuestToken();
+  }
+
+  // Private SLAS clients (own sandbox) authenticate with their secret.
   const loginClient = new ShopperLogin(apiConfig);
   try {
     return await helpers.loginGuestUserPrivate(
       loginClient,
       {},
-      { clientSecret: process.env.SFCC_SECRET || "" }
+      { clientSecret: process.env.SFCC_SECRET },
     );
   } catch (e) {
     const error = await ensureSDKResponseError(
       e,
-      "Failed to retrieve access token"
+      "Failed to retrieve access token",
     );
     throw new Error(error);
   }
+}
+
+const slasBase = () =>
+  `https://${apiConfig.parameters.shortCode}.api.commercecloud.salesforce.com/shopper/auth/v1/organizations/${apiConfig.parameters.organizationId}`;
+
+// Must be registered as a redirect URI on the SLAS client. It is never
+// visited: the authorize redirect is only parsed for the code/usid params.
+const SLAS_REDIRECT_URI = "http://localhost:3000/callback";
+
+async function getPublicClientGuestToken(): Promise<{ access_token: string }> {
+  const randomBytes = new Uint8Array(48);
+  crypto.getRandomValues(randomBytes);
+  const codeVerifier = Buffer.from(randomBytes).toString("base64url");
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(codeVerifier),
+  );
+  const codeChallenge = Buffer.from(digest).toString("base64url");
+
+  const authorizeUrl = new URL(`${slasBase()}/oauth2/authorize`);
+  authorizeUrl.searchParams.set("redirect_uri", SLAS_REDIRECT_URI);
+  authorizeUrl.searchParams.set("response_type", "code");
+  authorizeUrl.searchParams.set("hint", "guest");
+  authorizeUrl.searchParams.set("client_id", apiConfig.parameters.clientId);
+  authorizeUrl.searchParams.set("channel_id", apiConfig.parameters.siteId);
+  authorizeUrl.searchParams.set("code_challenge", codeChallenge);
+
+  const authorizeRes = await fetch(authorizeUrl, { redirect: "manual" });
+  const location = authorizeRes.headers.get("location");
+
+  if (!location) {
+    throw new Error(
+      `SLAS authorize did not redirect: ${authorizeRes.status} ${await authorizeRes.text()}`,
+    );
+  }
+
+  const redirect = new URL(location);
+  const code = redirect.searchParams.get("code");
+  const usid = redirect.searchParams.get("usid");
+
+  if (!code) {
+    throw new Error(
+      `SLAS authorize response did not include a code: ${location}`,
+    );
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code_pkce",
+    code,
+    code_verifier: codeVerifier,
+    client_id: apiConfig.parameters.clientId,
+    channel_id: apiConfig.parameters.siteId,
+    redirect_uri: SLAS_REDIRECT_URI,
+  });
+  if (usid) body.set("usid", usid);
+
+  const tokenRes = await fetch(`${slasBase()}/oauth2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+
+  if (!tokenRes.ok) {
+    throw new Error(
+      `Failed to fetch guest token: ${tokenRes.status} ${await tokenRes.text()}`,
+    );
+  }
+
+  return tokenRes.json();
 }
 
 async function getGuestUserConfig(token?: string) {
@@ -370,7 +461,13 @@ async function getSFCCProduct(id: string) {
     },
   });
 
-  return reshapeProduct(product);
+  try {
+    return reshapeProduct(product);
+  } catch {
+    // The product exists but can't be displayed (e.g. missing name or images
+    // in the catalog) — treat it as not found rather than erroring the page.
+    return undefined;
+  }
 }
 
 async function searchProducts(options: {
@@ -401,15 +498,20 @@ async function searchProducts(options: {
 
   const results = await Promise.all(
     (searchResults.hits || []).map((product) => {
-      return productsClient.getProduct({
-        parameters: {
-          id: product.productId,
-        },
-      });
-    })
+      return (
+        productsClient
+          .getProduct({
+            parameters: {
+              id: product.productId,
+            },
+          })
+          // One unfetchable product shouldn't fail the entire search
+          .catch(() => null)
+      );
+    }),
   );
 
-  return reshapeProducts(results);
+  return reshapeProducts(results.filter((product) => product !== null));
 }
 
 async function getCartItems(createdBasket: ShopperBasketsTypes.Basket) {
@@ -424,8 +526,10 @@ async function getCartItems(createdBasket: ShopperBasketsTypes.Basket) {
         .filter((l) => l.productId)
         .map(async (l) => {
           const product = await getProduct(l.productId!);
-          productsInCart.push(product);
-        })
+          if (product) {
+            productsInCart.push(product);
+          }
+        }),
     );
 
     // Reshape the sfcc items and push them onto the cartItems
@@ -434,8 +538,8 @@ async function getCartItems(createdBasket: ShopperBasketsTypes.Basket) {
         reshapeProductItem(
           productItem,
           createdBasket.currency || "USD",
-          productsInCart.find((p) => p.id === productItem.productId)!
-        )
+          productsInCart.find((p) => p.id === productItem.productId)!,
+        ),
       );
     });
   }
@@ -462,14 +566,14 @@ export async function updateCustomerInfo(email: string) {
   } catch (e) {
     const error = await ensureSDKResponseError(
       e,
-      "Error updating basket email"
+      "Error updating basket email",
     );
     throw new Error(error);
   }
 }
 
 export async function updateShippingAddress(
-  shippingAddress: ShopperBasketsTypes.OrderAddress
+  shippingAddress: ShopperBasketsTypes.OrderAddress,
 ) {
   const cartId = (await cookies()).get("cartId")?.value!;
   const guestToken = (await cookies()).get("guest_token")?.value;
@@ -489,14 +593,14 @@ export async function updateShippingAddress(
   } catch (e) {
     const error = await ensureSDKResponseError(
       e,
-      "Error updating basket shipping address"
+      "Error updating basket shipping address",
     );
     throw new Error(error);
   }
 }
 
 export async function updateBillingAddress(
-  billingAddress: ShopperBasketsTypes.OrderAddress
+  billingAddress: ShopperBasketsTypes.OrderAddress,
 ) {
   const cartId = (await cookies()).get("cartId")?.value!;
   const guestToken = (await cookies()).get("guest_token")?.value;
@@ -514,7 +618,7 @@ export async function updateBillingAddress(
   } catch (e) {
     const error = await ensureSDKResponseError(
       e,
-      "Error updating basket billing address"
+      "Error updating basket billing address",
     );
     throw new Error(error);
   }
@@ -541,7 +645,7 @@ export async function updateShippingMethod(shippingMethodId: string) {
   } catch (e) {
     const error = await ensureSDKResponseError(
       e,
-      "Error updating shipping method"
+      "Error updating shipping method",
     );
     throw new Error(error);
   }
@@ -584,7 +688,7 @@ export async function addPaymentMethod(paymentData: {
   } catch (e) {
     const error = await ensureSDKResponseError(
       e,
-      "Error adding payment instrument to basket"
+      "Error adding payment instrument to basket",
     );
     throw new Error(error);
   }
@@ -610,7 +714,7 @@ export async function getShippingMethods() {
   } catch (e) {
     const error = await ensureSDKResponseError(
       e,
-      "Error fetching shipping methods"
+      "Error fetching shipping methods",
     );
     throw new Error(error);
   }
