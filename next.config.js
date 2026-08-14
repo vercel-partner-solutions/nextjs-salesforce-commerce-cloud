@@ -10,7 +10,7 @@ module.exports = {
       },
       {
         protocol: 'https',
-        hostname: 'zylq-002.dx.commercecloud.salesforce.com',
+        hostname: process.env.SFCC_SANDBOX_DOMAIN || 'zylq-002.dx.commercecloud.salesforce.com'
       }
     ]
   }

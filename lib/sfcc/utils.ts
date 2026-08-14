@@ -60,11 +60,12 @@ export async function salesforceFetch<T>({
 }
 
 export const validateEnvironmentVariables = () => {
+  // SFCC_SECRET is intentionally not required: public SLAS clients
+  // (e.g. the Salesforce demo backend) have no secret.
   const requiredEnvironmentVariables = [
     'SITE_NAME',
     'SFCC_CLIENT_ID',
     'SFCC_ORGANIZATIONID',
-    'SFCC_SECRET',
     'SFCC_SHORTCODE',
     'SFCC_SITEID',
     'SFCC_SANDBOX_DOMAIN',

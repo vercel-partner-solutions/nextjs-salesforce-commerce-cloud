@@ -1,9 +1,10 @@
-import { Checkout, Customer, Product as SalesforceProduct, Search } from 'commerce-sdk';
+import { Checkout, Product as SalesforceProduct, Search } from 'commerce-sdk';
 import { ShopperBaskets } from 'commerce-sdk/dist/checkout/checkout';
 import { defaultSort, storeCatalog, TAGS } from 'lib/constants';
 import { unstable_cache as cache, revalidateTag } from 'next/cache';
 import { cookies, headers } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
+import { getGuestUserAuthToken } from './auth';
 import { getProductRecommendations as getOCProductRecommendations } from './ocapi';
 import { Cart, CartItem, Collection, Image, Product, ProductRecommendations } from './types';
 
@@ -50,7 +51,16 @@ export const getCollectionProducts = cache(
     reverse?: boolean;
     sortKey?: string;
   }) => {
-    return await searchProducts({ categoryId: collection, sortKey });
+    const products = await searchProducts({ categoryId: collection, sortKey });
+
+    // The hidden-homepage-* categories only exist in custom site data. When
+    // running against a catalog without them (e.g. the Salesforce demo
+    // backend), fall back to new arrivals so the homepage still has content.
+    if (!products.length && collection.startsWith('hidden-homepage')) {
+      return await searchProducts({ categoryId: 'newarrivals', sortKey });
+    }
+
+    return products;
   },
   ['get-collection-products'],
   { tags: [TAGS.products, TAGS.collections] }
@@ -240,8 +250,16 @@ export async function updateCart(
 }
 
 export async function getProductRecommendations(productId: string) {
-  const ocProductRecommendations =
-    await getOCProductRecommendations<ProductRecommendations>(productId);
+  let ocProductRecommendations: ProductRecommendations | undefined;
+
+  try {
+    ocProductRecommendations = await getOCProductRecommendations<ProductRecommendations>(productId);
+  } catch (e) {
+    // OCAPI is not open to every client (e.g. the Salesforce demo backend
+    // rejects it with a 403). Recommendations are non-critical, so render
+    // the product page without them instead of failing.
+    return [];
+  }
 
   if (!ocProductRecommendations?.recommendations?.length) return [];
 
@@ -297,19 +315,6 @@ export async function revalidate(req: NextRequest) {
   }
 
   return NextResponse.json({ status: 200, revalidated: true, now: Date.now() });
-}
-
-async function getGuestUserAuthToken() {
-  const base64data = Buffer.from(
-    `${process.env.SFCC_CLIENT_ID}:${process.env.SFCC_SECRET}`
-  ).toString('base64');
-  const headers = { Authorization: `Basic ${base64data}` };
-  const client = new Customer.ShopperLogin(config);
-
-  return await client.getAccessToken({
-    headers,
-    body: { grant_type: 'client_credentials', channel_id: process.env.SFCC_SITEID }
-  });
 }
 
 async function getGuestUserConfig(token?: string) {
@@ -373,7 +378,8 @@ async function searchProducts(options: { query?: string; categoryId?: string; so
 
   const productsClient = new SalesforceProduct.ShopperProducts(config);
   await Promise.all(
-    searchResults.hits.map(async (product: { productId: string }, index: number) => {
+    // `hits` is omitted from the response entirely when there are no results
+    (searchResults.hits ?? []).map(async (product: { productId: string }, index: number) => {
       const productResult = await productsClient.getProduct({
         parameters: {
           organizationId: config.parameters.organizationId,
@@ -517,9 +523,15 @@ function reshapeProducts(products: SalesforceProduct.ShopperProducts.Product[]) 
   const reshapedProducts = [];
   for (const product of products) {
     if (product) {
-      const reshapedProduct = reshapeProduct(product);
-      if (reshapedProduct) {
-        reshapedProducts.push(reshapedProduct);
+      try {
+        const reshapedProduct = reshapeProduct(product);
+        if (reshapedProduct) {
+          reshapedProducts.push(reshapedProduct);
+        }
+      } catch (e) {
+        // Skip products that can't be reshaped (e.g. no images at all in the
+        // catalog) rather than failing the entire page.
+        console.warn(`Skipping product ${product.id}: ${(e as Error).message}`);
       }
     }
   }
@@ -533,7 +545,11 @@ function reshapeImages(
 
   const largeGroup = imageGroups.filter((g) => g.viewType === 'large');
 
-  const images = [...largeGroup].map((group) => group.images).flat();
+  // Not every catalog provides 'large' images for every product (the
+  // Salesforce demo catalog doesn't) — fall back to any available view type.
+  const groups = largeGroup.length ? largeGroup : imageGroups;
+
+  const images = [...groups].map((group) => group.images).flat();
 
   return images.map((image) => {
     return {
