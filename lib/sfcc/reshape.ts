@@ -14,7 +14,7 @@ import {
 } from "./types";
 
 export function reshapeShippingMethods(
-  shippingMethods: ShopperBasketsTypes.ShippingMethodResult
+  shippingMethods: ShopperBasketsTypes.ShippingMethodResult,
 ): ShippingMethod[] {
   return (
     shippingMethods.applicableShippingMethods?.map((method) => ({
@@ -34,7 +34,7 @@ export function reshapeShippingMethods(
 }
 
 export function reshapeCategory(
-  category: ShopperProductsTypes.Category
+  category: ShopperProductsTypes.Category,
 ): Collection | undefined {
   if (!category) {
     return undefined;
@@ -129,14 +129,20 @@ export function reshapeProduct(product: ShopperProductsTypes.Product): Product {
 }
 
 export function reshapeProducts(
-  products: ShopperProductsTypes.Product[]
+  products: ShopperProductsTypes.Product[],
 ): Product[] {
   const reshapedProducts = [];
   for (const product of products) {
     if (product) {
-      const reshapedProduct = reshapeProduct(product);
-      if (reshapedProduct) {
-        reshapedProducts.push(reshapedProduct);
+      try {
+        const reshapedProduct = reshapeProduct(product);
+        if (reshapedProduct) {
+          reshapedProducts.push(reshapedProduct);
+        }
+      } catch (e) {
+        // Skip products that can't be reshaped (e.g. no images at all in the
+        // catalog) rather than failing the entire list.
+        console.warn(`Skipping product ${product.id}: ${(e as Error).message}`);
       }
     }
   }
@@ -144,13 +150,17 @@ export function reshapeProducts(
 }
 
 export function reshapeImages(
-  imageGroups: ShopperProductsTypes.ImageGroup[] | undefined
+  imageGroups: ShopperProductsTypes.ImageGroup[] | undefined,
 ): Image[] {
   if (!imageGroups) return [];
 
   const largeGroup = imageGroups.filter((g) => g.viewType === "large");
 
-  const images = [...largeGroup].map((group) => group.images).flat();
+  // Not every catalog provides 'large' images for every product (the
+  // Salesforce demo catalog doesn't) — fall back to any available view type.
+  const groups = largeGroup.length ? largeGroup : imageGroups;
+
+  const images = [...groups].map((group) => group.images).flat();
 
   return images.map((image) => {
     return {
@@ -164,14 +174,14 @@ export function reshapeImages(
 
 export function reshapeVariants(
   variants: ShopperProductsTypes.Variant[],
-  product: ShopperProductsTypes.Product
+  product: ShopperProductsTypes.Product,
 ) {
   return variants.map((variant) => reshapeVariant(variant, product));
 }
 
 export function reshapeVariant(
   variant: ShopperProductsTypes.Variant,
-  product: ShopperProductsTypes.Product
+  product: ShopperProductsTypes.Product,
 ) {
   return {
     id: variant.productId,
@@ -197,7 +207,7 @@ export function reshapeVariant(
 export function reshapeProductItem(
   item: ShopperBasketsTypes.ProductItem,
   currency: string,
-  matchingProduct: Product
+  matchingProduct: Product,
 ): CartItem {
   return {
     id: item.itemId || "",
@@ -221,7 +231,7 @@ export function reshapeProductItem(
               matchingProduct.options
                 ?.find((opt) => opt.id === key)
                 ?.values?.find((v) => v.id === value)?.name || String(value),
-          })
+          }),
         ) || [],
       product: matchingProduct,
     },
@@ -230,7 +240,7 @@ export function reshapeProductItem(
 
 export function reshapeBasket(
   basket: ShopperBasketsTypes.Basket,
-  cartItems: CartItem[]
+  cartItems: CartItem[],
 ): Cart {
   // For demo purposes, we are assuming there's a single shipment.
   const shipment = basket.shipments?.[0];
@@ -309,7 +319,7 @@ export function reshapeBasket(
 
 export function reshapeOrder(
   order: ShopperOrdersTypes.Order,
-  cartItems: CartItem[]
+  cartItems: CartItem[],
 ): Order {
   const cart = reshapeBasket(order as ShopperBasketsTypes.Basket, cartItems);
   return {
