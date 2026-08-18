@@ -9,11 +9,7 @@ import {
   ShopperSearch,
 } from "commerce-sdk-isomorphic";
 import { TAGS } from "lib/constants";
-import {
-  unstable_cacheLife as cacheLife,
-  unstable_cacheTag as cacheTag,
-  revalidateTag,
-} from "next/cache";
+import { cacheLife, cacheTag, revalidateTag } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { defaultSort, storeCatalog } from "./constants";

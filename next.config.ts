@@ -1,9 +1,7 @@
 export default {
+  cacheComponents: true,
   experimental: {
-    ppr: true,
     inlineCss: true,
-    useCache: true,
-    clientSegmentCache: true,
   },
   images: {
     formats: ["image/avif", "image/webp"],
