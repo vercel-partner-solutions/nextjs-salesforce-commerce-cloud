@@ -1,6 +1,5 @@
 "use server";
 
-import { TAGS } from "lib/constants";
 import {
   addToCart,
   createCart,
@@ -8,7 +7,7 @@ import {
   removeFromCart,
   updateCart,
 } from "lib/sfcc";
-import { revalidateTag } from "next/cache";
+import { refresh } from "next/cache";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
@@ -22,7 +21,7 @@ export async function addItem(
 
   try {
     await addToCart([{ merchandiseId: selectedVariantId, quantity: 1 }]);
-    revalidateTag(TAGS.cart, "max");
+    refresh();
   } catch (e) {
     return "Error adding item to cart";
   }
@@ -42,7 +41,7 @@ export async function removeItem(prevState: any, merchandiseId: string) {
 
     if (lineItem && lineItem.id) {
       await removeFromCart([lineItem.id]);
-      revalidateTag(TAGS.cart, "max");
+      refresh();
     } else {
       return "Item not found in cart";
     }
@@ -88,7 +87,7 @@ export async function updateItemQuantity(
       await addToCart([{ merchandiseId, quantity }]);
     }
 
-    revalidateTag(TAGS.cart, "max");
+    refresh();
   } catch (e) {
     console.error(e);
     return "Error updating item quantity";
@@ -103,4 +102,7 @@ export async function redirectToCheckout() {
 export async function createCartAndSetCookie() {
   let cart = await createCart();
   (await cookies()).set("cartId", cart.id!);
+  // Without this the client keeps `cart` undefined, so CartModal's effect
+  // creates another basket on every navigation.
+  refresh();
 }
