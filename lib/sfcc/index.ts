@@ -28,6 +28,10 @@ import { getCardType, maskCardNumber } from "./utils";
 
 const apiConfig = {
   throwOnBadResponse: true,
+  // Use the platform fetch. Without this the SDK falls back to its bundled
+  // node-fetch 2.6.13, whose Request constructor calls the deprecated
+  // url.parse() (DEP0169) and gets bundled into the server output.
+  fetch: globalThis.fetch,
   parameters: {
     clientId: process.env.SFCC_CLIENT_ID || "",
     organizationId: process.env.SFCC_ORGANIZATIONID || "",
