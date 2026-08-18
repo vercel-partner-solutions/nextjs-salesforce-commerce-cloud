@@ -36,6 +36,39 @@ const apiConfig = {
   },
 };
 
+type SfccConfig = typeof apiConfig & { headers?: Record<string, string> };
+
+// Build the SCAPI base URI ourselves instead of letting the SDK substitute
+// {shortCode} into its default template. Since v4 the SDK percent-encodes path
+// parameters, which corrupts a shortcode that carries a path of its own -- a
+// proxy value like "host/scapi" becomes "host%2Fscapi" and the URL is invalid.
+// For a plain shortcode this produces exactly the SDK's own default.
+const scapiBaseUri = (apiPath: string) =>
+  `https://${apiConfig.parameters.shortCode}.api.commercecloud.salesforce.com/${apiPath}`;
+
+const shopperLogin = (config: SfccConfig) =>
+  new ShopperLogin({ ...config, baseUri: scapiBaseUri("shopper/auth/v1") });
+const shopperProducts = (config: SfccConfig) =>
+  new ShopperProducts({
+    ...config,
+    baseUri: scapiBaseUri("product/shopper-products/v1"),
+  });
+const shopperSearch = (config: SfccConfig) =>
+  new ShopperSearch({
+    ...config,
+    baseUri: scapiBaseUri("search/shopper-search/v1"),
+  });
+const shopperBaskets = (config: SfccConfig) =>
+  new ShopperBaskets({
+    ...config,
+    baseUri: scapiBaseUri("checkout/shopper-baskets/v1"),
+  });
+const shopperOrders = (config: SfccConfig) =>
+  new ShopperOrders({
+    ...config,
+    baseUri: scapiBaseUri("checkout/shopper-orders/v1"),
+  });
+
 export async function getCollections() {
   "use cache";
   cacheTag(TAGS.collections);
@@ -117,7 +150,7 @@ export async function createCart() {
   const config = await getGuestUserConfig(guestToken);
 
   // initialize the basket client
-  const basketClient = new ShopperBaskets(config);
+  const basketClient = shopperBaskets(config);
 
   // create an empty ShopperBaskets.Basket
   const createdBasket = await basketClient.createBasket({
@@ -139,7 +172,7 @@ export async function getCart() {
   if (!cartId) return;
 
   try {
-    const basketClient = new ShopperBaskets(config);
+    const basketClient = shopperBaskets(config);
 
     const basket = await basketClient.getBasket({
       parameters: {
@@ -166,7 +199,7 @@ export async function addToCart(
   const config = await getGuestUserConfig(guestToken);
 
   try {
-    const basketClient = new ShopperBaskets(config);
+    const basketClient = shopperBaskets(config);
 
     const basket = await basketClient.addItemToBasket({
       parameters: {
@@ -200,7 +233,7 @@ export async function removeFromCart(lineIds: string[]) {
   const guestToken = (await cookies()).get("guest_token")?.value;
   const config = await getGuestUserConfig(guestToken);
 
-  const basketClient = new ShopperBaskets(config);
+  const basketClient = shopperBaskets(config);
 
   const basket = await basketClient.removeItemFromBasket({
     parameters: {
@@ -221,7 +254,7 @@ export async function updateCart(
   const guestToken = (await cookies()).get("guest_token")?.value;
   const config = await getGuestUserConfig(guestToken);
 
-  const basketClient = new ShopperBaskets(config);
+  const basketClient = shopperBaskets(config);
 
   // ProductItem quantity can not be updated through the API
   // Quantity updates need to remove all items from the cart and add them back with updated quantities
@@ -332,20 +365,21 @@ export async function revalidate(req: NextRequest) {
 async function getGuestUserAuthToken(): Promise<{ access_token: string }> {
   // Public SLAS clients (no secret, e.g. Salesforce's hosted demo backend)
   // use the guest authorization-code + PKCE flow. Implemented with plain
-  // fetch because the SDK's loginGuestUser helper breaks under Next's
-  // bundled server runtime.
-  if (!process.env.SFCC_SECRET) {
+  // fetch because the SDK's loginGuestUser helper expects a browser redirect.
+  const clientSecret = process.env.SFCC_SECRET;
+  if (!clientSecret) {
     return await getPublicClientGuestToken();
   }
 
   // Private SLAS clients (own sandbox) authenticate with their secret.
-  const loginClient = new ShopperLogin(apiConfig);
+  const loginClient = shopperLogin(apiConfig);
   try {
-    return await helpers.loginGuestUserPrivate(
-      loginClient,
-      {},
-      { clientSecret: process.env.SFCC_SECRET },
-    );
+    // SDK v4 refactored the SLAS helpers to take one options object.
+    return await helpers.loginGuestUserPrivate({
+      slasClient: loginClient,
+      parameters: {},
+      credentials: { clientSecret },
+    });
   } catch (e) {
     const error = await ensureSDKResponseError(
       e,
@@ -436,7 +470,7 @@ async function getGuestUserConfig(token?: string) {
 
 async function getSFCCCollections() {
   const config = await getGuestUserConfig();
-  const productsClient = new ShopperProducts(config);
+  const productsClient = shopperProducts(config);
 
   const result = await productsClient.getCategories({
     parameters: {
@@ -449,7 +483,7 @@ async function getSFCCCollections() {
 
 async function getSFCCProduct(id: string) {
   const config = await getGuestUserConfig();
-  const productsClient = new ShopperProducts(config);
+  const productsClient = shopperProducts(config);
 
   const product = await productsClient.getProduct({
     parameters: {
@@ -480,17 +514,19 @@ async function searchProducts(options: {
   } = options;
   const config = await getGuestUserConfig();
 
-  const searchClient = new ShopperSearch(config);
+  const searchClient = shopperSearch(config);
   const searchResults = await searchClient.productSearch({
     parameters: {
       q: query || "",
-      refine: categoryId ? [`cgid=${categoryId}`] : [],
+      // v5 types refine as a single string, and the parameters index signature
+      // rejects an explicit undefined, so omit the key when there is no filter.
+      ...(categoryId ? { refine: `cgid=${categoryId}` } : {}),
       sort: sortKey,
       limit,
     },
   });
 
-  const productsClient = new ShopperProducts(config);
+  const productsClient = shopperProducts(config);
 
   const results = await Promise.all(
     (searchResults.hits || []).map((product) => {
@@ -510,7 +546,11 @@ async function searchProducts(options: {
   return reshapeProducts(results.filter((product) => product !== null));
 }
 
-async function getCartItems(createdBasket: ShopperBasketsTypes.Basket) {
+// Accepts either shape: Order and Basket diverged in v5 (Order.channelType
+// gained "chatgpt"), but the fields read below are identical on both.
+async function getCartItems(
+  createdBasket: ShopperBasketsTypes.Basket | ShopperOrdersTypes.Order,
+) {
   const cartItems: CartItem[] = [];
 
   if (createdBasket.productItems) {
@@ -549,7 +589,7 @@ export async function updateCustomerInfo(email: string) {
   const config = await getGuestUserConfig(guestToken);
 
   try {
-    const basketClient = new ShopperBaskets(config);
+    const basketClient = shopperBaskets(config);
 
     await basketClient.updateCustomerForBasket({
       parameters: {
@@ -576,7 +616,7 @@ export async function updateShippingAddress(
   const config = await getGuestUserConfig(guestToken);
 
   try {
-    const basketClient = new ShopperBaskets(config);
+    const basketClient = shopperBaskets(config);
 
     // Use 'me' as the shipment ID, which refers to the current customer's default shipment
     await basketClient.updateShippingAddressForShipment({
@@ -603,7 +643,7 @@ export async function updateBillingAddress(
   const config = await getGuestUserConfig(guestToken);
 
   try {
-    const basketClient = new ShopperBaskets(config);
+    const basketClient = shopperBaskets(config);
 
     await basketClient.updateBillingAddressForBasket({
       parameters: {
@@ -626,7 +666,7 @@ export async function updateShippingMethod(shippingMethodId: string) {
   const config = await getGuestUserConfig(guestToken);
 
   try {
-    const basketClient = new ShopperBaskets(config);
+    const basketClient = shopperBaskets(config);
 
     // Use 'me' as the shipment ID, which refers to the current customer's default shipment
     await basketClient.updateShippingMethodForShipment({
@@ -659,7 +699,7 @@ export async function addPaymentMethod(paymentData: {
   const config = await getGuestUserConfig(guestToken);
 
   try {
-    const basketClient = new ShopperBaskets(config);
+    const basketClient = shopperBaskets(config);
 
     // Using the simplest example with credit card payment type for demo purposes.
     // Real implementations might also incorporate 3p payment providers as well.
@@ -696,7 +736,7 @@ export async function getShippingMethods() {
   const config = await getGuestUserConfig(guestToken);
 
   try {
-    const basketClient = new ShopperBaskets(config);
+    const basketClient = shopperBaskets(config);
 
     // Use 'me' as the shipment ID, which refers to the current customer's default shipment
     const shippingMethods = await basketClient.getShippingMethodsForShipment({
@@ -722,7 +762,7 @@ export async function placeOrder() {
   const config = await getGuestUserConfig(guestToken);
 
   try {
-    const ordersClient = new ShopperOrders(config);
+    const ordersClient = shopperOrders(config);
 
     // NOTE: Need to cast to the proper type. Looks like a bug in the SDK's typedefs.
     const order = (await ordersClient.createOrder({
@@ -747,7 +787,7 @@ export async function getCheckoutOrder() {
   }
 
   try {
-    const ordersClient = new ShopperOrders(config);
+    const ordersClient = shopperOrders(config);
 
     // NOTE: Need to cast to the proper type. Looks like a bug in the SDK's typedefs.
     const order = (await ordersClient.getOrder({
