@@ -430,8 +430,6 @@ async function searchProducts(options: {
   const searchResults = await searchClient.productSearch({
     parameters: {
       q: query || "",
-      // v5 types refine as a single string, and the parameters index signature
-      // rejects an explicit undefined, so omit the key when there is no filter.
       ...(categoryId ? { refine: `cgid=${categoryId}` } : {}),
       sort: sortKey,
       limit,
