@@ -13,7 +13,7 @@ export type SortFilterItem = {
 };
 
 export const storeCatalog = {
-  ids: "mens,womens,newarrivals,top-seller",
+  ids: ["mens", "womens", "newarrivals", "top-seller"],
 };
 
 export const defaultSort: SortFilterItem = {

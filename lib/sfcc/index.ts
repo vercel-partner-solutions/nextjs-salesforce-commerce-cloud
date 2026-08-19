@@ -28,6 +28,14 @@ import { getCardType, maskCardNumber } from "./utils";
 
 const apiConfig = {
   throwOnBadResponse: true,
+  // Use the platform fetch. Without this the SDK falls back to its bundled
+  // node-fetch 2.6.13, whose Request constructor calls the deprecated
+  // url.parse() (DEP0169) and gets bundled into the server output.
+  fetch: globalThis.fetch,
+  // Route every call through a proxy in front of SCAPI. The SDK replaces the
+  // origin and prepends this path, so shortCode is unused while it is set.
+  // Leave SFCC_PROXY empty to talk to SCAPI directly.
+  proxy: process.env.SFCC_PROXY || undefined,
   parameters: {
     clientId: process.env.SFCC_CLIENT_ID || "",
     organizationId: process.env.SFCC_ORGANIZATIONID || "",
@@ -329,23 +337,30 @@ export async function revalidate(req: NextRequest) {
   return NextResponse.json({ status: 200, revalidated: true, now: Date.now() });
 }
 
-async function getGuestUserAuthToken(): Promise<{ access_token: string }> {
-  // Public SLAS clients (no secret, e.g. Salesforce's hosted demo backend)
-  // use the guest authorization-code + PKCE flow. Implemented with plain
-  // fetch because the SDK's loginGuestUser helper breaks under Next's
-  // bundled server runtime.
-  if (!process.env.SFCC_SECRET) {
-    return await getPublicClientGuestToken();
-  }
+// Must be registered as a redirect URI on the SLAS client. It is never
+// visited: on the server the SDK only parses the authorize redirect for its
+// code and usid params.
+const SLAS_REDIRECT_URI = "http://localhost:3000/callback";
 
-  // Private SLAS clients (own sandbox) authenticate with their secret.
+async function getGuestUserAuthToken(): Promise<{ access_token: string }> {
   const loginClient = new ShopperLogin(apiConfig);
+  const clientSecret = process.env.SFCC_SECRET;
   try {
-    return await helpers.loginGuestUserPrivate(
-      loginClient,
-      {},
-      { clientSecret: process.env.SFCC_SECRET },
-    );
+    // Public SLAS clients (no secret, e.g. Salesforce's hosted demo backend)
+    // use the guest authorization-code + PKCE flow.
+    if (!clientSecret) {
+      return await helpers.loginGuestUser({
+        slasClient: loginClient,
+        parameters: { redirectURI: SLAS_REDIRECT_URI },
+      });
+    }
+
+    // Private SLAS clients (own sandbox) authenticate with their secret.
+    return await helpers.loginGuestUserPrivate({
+      slasClient: loginClient,
+      parameters: {},
+      credentials: { clientSecret },
+    });
   } catch (e) {
     const error = await ensureSDKResponseError(
       e,
@@ -353,75 +368,6 @@ async function getGuestUserAuthToken(): Promise<{ access_token: string }> {
     );
     throw new Error(error);
   }
-}
-
-const slasBase = () =>
-  `https://${apiConfig.parameters.shortCode}.api.commercecloud.salesforce.com/shopper/auth/v1/organizations/${apiConfig.parameters.organizationId}`;
-
-// Must be registered as a redirect URI on the SLAS client. It is never
-// visited: the authorize redirect is only parsed for the code/usid params.
-const SLAS_REDIRECT_URI = "http://localhost:3000/callback";
-
-async function getPublicClientGuestToken(): Promise<{ access_token: string }> {
-  const randomBytes = new Uint8Array(48);
-  crypto.getRandomValues(randomBytes);
-  const codeVerifier = Buffer.from(randomBytes).toString("base64url");
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(codeVerifier),
-  );
-  const codeChallenge = Buffer.from(digest).toString("base64url");
-
-  const authorizeUrl = new URL(`${slasBase()}/oauth2/authorize`);
-  authorizeUrl.searchParams.set("redirect_uri", SLAS_REDIRECT_URI);
-  authorizeUrl.searchParams.set("response_type", "code");
-  authorizeUrl.searchParams.set("hint", "guest");
-  authorizeUrl.searchParams.set("client_id", apiConfig.parameters.clientId);
-  authorizeUrl.searchParams.set("channel_id", apiConfig.parameters.siteId);
-  authorizeUrl.searchParams.set("code_challenge", codeChallenge);
-
-  const authorizeRes = await fetch(authorizeUrl, { redirect: "manual" });
-  const location = authorizeRes.headers.get("location");
-
-  if (!location) {
-    throw new Error(
-      `SLAS authorize did not redirect: ${authorizeRes.status} ${await authorizeRes.text()}`,
-    );
-  }
-
-  const redirect = new URL(location);
-  const code = redirect.searchParams.get("code");
-  const usid = redirect.searchParams.get("usid");
-
-  if (!code) {
-    throw new Error(
-      `SLAS authorize response did not include a code: ${location}`,
-    );
-  }
-
-  const body = new URLSearchParams({
-    grant_type: "authorization_code_pkce",
-    code,
-    code_verifier: codeVerifier,
-    client_id: apiConfig.parameters.clientId,
-    channel_id: apiConfig.parameters.siteId,
-    redirect_uri: SLAS_REDIRECT_URI,
-  });
-  if (usid) body.set("usid", usid);
-
-  const tokenRes = await fetch(`${slasBase()}/oauth2/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-
-  if (!tokenRes.ok) {
-    throw new Error(
-      `Failed to fetch guest token: ${tokenRes.status} ${await tokenRes.text()}`,
-    );
-  }
-
-  return tokenRes.json();
 }
 
 async function getGuestUserConfig(token?: string) {
@@ -484,7 +430,7 @@ async function searchProducts(options: {
   const searchResults = await searchClient.productSearch({
     parameters: {
       q: query || "",
-      refine: categoryId ? [`cgid=${categoryId}`] : [],
+      ...(categoryId ? { refine: `cgid=${categoryId}` } : {}),
       sort: sortKey,
       limit,
     },
@@ -510,7 +456,11 @@ async function searchProducts(options: {
   return reshapeProducts(results.filter((product) => product !== null));
 }
 
-async function getCartItems(createdBasket: ShopperBasketsTypes.Basket) {
+// Accepts either shape: Order and Basket diverged in v5 (Order.channelType
+// gained "chatgpt"), but the fields read below are identical on both.
+async function getCartItems(
+  createdBasket: ShopperBasketsTypes.Basket | ShopperOrdersTypes.Order,
+) {
   const cartItems: CartItem[] = [];
 
   if (createdBasket.productItems) {
